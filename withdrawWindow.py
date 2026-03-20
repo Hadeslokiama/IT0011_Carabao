@@ -49,16 +49,62 @@ class WithdrawWindow(QWidget):
     def asql(self):
         conn = getConnection()
         cur = conn.cursor()
-        cur.execute("SELECT balance, account_type FROM accounts WHERE account_number = %s", (self.Anum,))
+        cur.execute(
+            "SELECT balance, account_type FROM accounts WHERE account_number = %s", (self.Anum,)
+        )
         result = cur.fetchone()
         if result is None:
             QMessageBox.critical(self, "ERROR", "Account number not found")
-        else: 
+        else:
             self.bal = result[0]
             self.acct = result[1]
+            cur.close()
+            conn.close()
+
+            if not self.verify_pin():    # PIN check before proceeding
+                return
+
             self.anumchkd()
-        cur.close()
-        conn.close()
+        
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals() and conn.open:
+            conn.close()
+
+    def verify_pin(self):
+        try:
+            conn = getConnection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pin FROM accounts WHERE account_number = %s", (self.Anum,)
+            )
+            result = cur.fetchone()
+            stored_pin = result[0] if result else None
+        except Exception as e:
+            QMessageBox.critical(self, "Database Error", str(e))
+            return False
+        finally:
+            if 'cur' in locals():
+                cur.close()
+            if 'conn' in locals() and conn.open:
+                conn.close()
+
+        from PyQt5.QtWidgets import QInputDialog
+        pin, ok = QInputDialog.getText(
+            self, "PIN Verification",
+            "Enter your PIN:",
+            QLineEdit.Password
+        )
+
+        if not ok or pin.strip() == "":
+            QMessageBox.warning(self, "Cancelled", "Transaction cancelled.")
+            return False
+
+        if pin.strip() != stored_pin:
+            QMessageBox.critical(self, "Invalid PIN", "Incorrect PIN. Transaction cancelled.")
+            return False
+
+        return True
 
     def upd_bal(self, updBal):
         conn = getConnection()
@@ -70,6 +116,24 @@ class WithdrawWindow(QWidget):
         conn.close()
     #--END OF SQL
 
+    def log_transaction(self, transaction_type, amount, new_balance):
+        try:
+            conn = getConnection()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO transactions (account_number, transaction_type, amount, new_balance) "
+                "VALUES (%s, %s, %s, %s)",
+                (self.Anum, transaction_type, amount, new_balance)
+            )
+            conn.commit()
+        except Exception as e:
+            pass  # logging failure should not block the transaction
+        finally:
+            if 'cur' in locals():
+                cur.close()
+            if 'conn' in locals() and conn.open:
+                conn.close()
+                
     #SAVINGS ACCOUNT
     def sa(self):
         self.clrL()
@@ -130,8 +194,13 @@ class WithdrawWindow(QWidget):
     def sa_check_AmtIn(self):
         try:
             amt = int(self.sentBal.text())
-            if amt < 300: raise ValueError
-            return amt 
+            if amt < 300:
+                raise ValueError
+            if amt > self.sacur_bal:
+                QMessageBox.critical(self, "ERROR", f"Insufficient balance. Current balance is ₱{self.sacur_bal:,.2f}")
+                self.sentBal.clear()
+                return None
+            return amt
         except ValueError:
             click = self.invalin()
             if click == QMessageBox.Cancel:
@@ -146,7 +215,12 @@ class WithdrawWindow(QWidget):
     def ca_check_AmtIn(self):
         try:
             amt = int(self.centBal.text())
-            if amt < 500: raise ValueError
+            if amt < 500:
+                raise ValueError
+            if amt > self.cacur_bal:
+                QMessageBox.critical(self, "ERROR", f"Insufficient balance. Current balance is ₱{self.cacur_bal:,.2f}")
+                self.centBal.clear()
+                return None
             return amt
         except ValueError:
             click = self.invalin()
@@ -164,6 +238,7 @@ class WithdrawWindow(QWidget):
         if amt is not None:
             new_bal = self.sacur_bal - amt
             self.upd_bal(new_bal)
+            self.log_transaction("Withdraw", amt, new_bal)
             self.end_msg()
     
     def ca_calcWithdraw(self):
@@ -171,6 +246,7 @@ class WithdrawWindow(QWidget):
         if amt is not None:
             new_bal = self.cacur_bal - amt
             self.upd_bal(new_bal)
+            self.log_transaction("Withdraw", amt, new_bal)
             self.end_msg()
         
     #--BUTTONS
